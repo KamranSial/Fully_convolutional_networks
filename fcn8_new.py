@@ -88,12 +88,14 @@ class FCN8VGG:
 
         self.fc6 = self._fc_layer(self.pool5, "fc6")
 
-        if train:
-            self.fc6 = tf.nn.dropout(self.fc6, 0.5)
+        if train is not None:
+            self.fc6 = tf.cond(train, lambda: tf.nn.dropout(self.fc6, 0.5), lambda: self.fc6)
+            print("fc6 dropout_added")
 
         self.fc7 = self._fc_layer(self.fc6, "fc7")
-        if train:
-            self.fc7 = tf.nn.dropout(self.fc7, 0.5)
+        if train is not None:
+            self.fc7 = tf.cond(train, lambda: tf.nn.dropout(self.fc7, 0.5), lambda: self.fc7)
+            print("fc7 dropout_added")
 
         if random_init_fc8:
             self.score_fr = self._score_layer(self.fc7, "score_fr",
@@ -271,7 +273,7 @@ class FCN8VGG:
         init = tf.constant_initializer(value=weights,
                                        dtype=tf.float32)
         var = tf.get_variable(name="up_filter", initializer=init,
-                              shape=weights.shape)
+                              shape=weights.shape,trainable=False)
         return var
 
     def get_conv_filter(self, name):

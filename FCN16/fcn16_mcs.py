@@ -13,7 +13,8 @@ import tensorflow as tf
 VGG_MEAN = [72.3900075701, 82.9080206596,73.1574881705 ]
 DATA_STD = [45.3104437099, 46.1445214188, 44.906197822]
 
-class FCN8VGG:
+
+class FCN16VGG:
     def __init__(self, vgg16_npy_path=None):
         if not os.path.isfile(vgg16_npy_path):
             logging.error(("File '%s' not found. Download it from "
@@ -26,7 +27,7 @@ class FCN8VGG:
         self.wd = 5e-4
         print("npy file loaded")
 
-    def build(self, rgb, train=False, num_classes=19, random_init_fc8=False,
+    def build(self, rgb, train=None, num_classes=19, random_init_fc8=False,
               debug=False):
         """
         Build the VGG model using loaded weights
@@ -54,8 +55,8 @@ class FCN8VGG:
             # assert blue.get_shape().as_list()[1:] == [224, 224, 1]
             bgr = tf.concat(3, [
                 (blue - VGG_MEAN[0])/DATA_STD[0],
-                (green - VGG_MEAN[1])/DATA_STD[0],
-                (red - VGG_MEAN[2])/DATA_STD[0],
+                (green - VGG_MEAN[1])/DATA_STD[1],
+                (red - VGG_MEAN[2])/DATA_STD[2],
             ])
 
             if debug:
@@ -83,6 +84,7 @@ class FCN8VGG:
 
         self.conv5_1 = self._conv_layer(self.pool4, "conv5_1")
         self.conv5_2 = self._conv_layer(self.conv5_1, "conv5_2")
+
         self.conv5_3 = self._conv_layer(self.conv5_2, "conv5_3")
         self.pool5 = self._max_pool(self.conv5_3, 'pool5', debug)
 
@@ -91,7 +93,7 @@ class FCN8VGG:
         if train is not None:
             self.fc6 = tf.cond(train, lambda: tf.nn.dropout(self.fc6, 0.5), lambda: self.fc6)
             print("fc6 dropout_added")
-
+            
         self.fc7 = self._fc_layer(self.fc6, "fc7")
         if train is not None:
             self.fc7 = tf.cond(train, lambda: tf.nn.dropout(self.fc7, 0.5), lambda: self.fc7)
@@ -112,25 +114,17 @@ class FCN8VGG:
                                             num_classes=num_classes,
                                             debug=debug, name='upscore2',
                                             ksize=4, stride=2)
-        self.score_pool4 = self._fc_layer(self.pool4, "score_pool4",
-                                          num_classes=num_classes,
-                                          relu=False)
+
+        self.score_pool4 = self._score_layer(self.pool4, "score_pool4",
+                                             num_classes=num_classes)
+
         self.fuse_pool4 = tf.add(self.upscore2, self.score_pool4)
 
-        self.upscore4 = self._upscore_layer(self.fuse_pool4,
-                                            shape=tf.shape(self.pool3),
-                                            num_classes=num_classes,
-                                            debug=debug, name='upscore4',
-                                            ksize=4, stride=2)
-        self.score_pool3 = self._score_layer(self.pool3, "score_pool3",
-                                             num_classes=num_classes)
-        self.fuse_pool3 = tf.add(self.upscore4, self.score_pool3)
-
-        self.upscore32 = self._upscore_layer(self.fuse_pool3,
+        self.upscore32 = self._upscore_layer(self.fuse_pool4,
                                              shape=tf.shape(bgr),
                                              num_classes=num_classes,
                                              debug=debug, name='upscore32',
-                                             ksize=16, stride=8)
+                                             ksize=32, stride=16)
 
         self.pred_up = tf.argmax(self.upscore32, dimension=3)
 
@@ -168,15 +162,8 @@ class FCN8VGG:
                 name = 'fc8'  # Name of score_fr layer in VGG Model
                 filt = self.get_fc_weight_reshape(name, [1, 1, 4096, 19],
                                                   num_classes=num_classes)
-            elif name == 'score_pool4':
-                shape = self.data_dict[name][0].shape
-                filt = self.get_fc_weight_reshape(name, shape=shape,
-                                                  num_classes=num_classes)
             else:
                 filt = self.get_fc_weight_reshape(name, [1, 1, 4096, 4096])
-
-            #self._add_wd_and_summary(filt, self.wd, "fc_wlosses")
-
             conv = tf.nn.conv2d(bottom, filt, [1, 1, 1, 1], padding='SAME')
             conv_biases = self.get_bias(name, num_classes=num_classes)
             bias = tf.nn.bias_add(conv, conv_biases)
@@ -202,16 +189,12 @@ class FCN8VGG:
                 stddev = (2 / num_input)**0.5
             elif name == "score_pool4":
                 stddev = 0.001
-            elif name == "score_pool3":
-                stddev = 0.0001
             # Apply convolution
             w_decay = self.wd
-
-            weights = self._variable_with_weight_decay(shape, stddev, w_decay,name,
-                                                       decoder=True)
+            weights = self._variable_with_weight_decay(shape, stddev, w_decay)
             conv = tf.nn.conv2d(bottom, weights, [1, 1, 1, 1], padding='SAME')
             # Apply bias
-            conv_biases = self._bias_variable([num_classes],name, constant=0.0)
+            conv_biases = self._bias_variable([num_classes], constant=0.0)
             bias = tf.nn.bias_add(conv, conv_biases)
 
             #_activation_summary(bias)
@@ -244,7 +227,6 @@ class FCN8VGG:
             stddev = (2 / num_input)**0.5
 
             weights = self.get_deconv_filter(f_shape)
-            #self._add_wd_and_summary(weights, self.wd, "fc_wlosses")
             deconv = tf.nn.conv2d_transpose(bottom, weights, output_shape,
                                             strides=strides, padding='SAME')
 
@@ -272,9 +254,8 @@ class FCN8VGG:
 
         init = tf.constant_initializer(value=weights,
                                        dtype=tf.float32)
-        var = tf.get_variable(name="up_filter", initializer=init,
-                              shape=weights.shape,trainable=False)
-        return var
+        return tf.get_variable(name="up_filter", initializer=init,
+                               shape=weights.shape, trainable=False)
 
     def get_conv_filter(self, name):
         init = tf.constant_initializer(value=self.data_dict[name][0],
@@ -288,7 +269,6 @@ class FCN8VGG:
             weight_decay = tf.mul(tf.nn.l2_loss(var), self.wd,
                                   name='weight_loss')
             tf.add_to_collection('losses', weight_decay)
-        #_variable_summaries(var)
         return var
 
     def get_bias(self, name, num_classes=None):
@@ -300,10 +280,8 @@ class FCN8VGG:
         #    shape = [num_classes]
         init = tf.constant_initializer(value=bias_wights,
                                        dtype=tf.float32)
-        
         var = tf.get_variable(name=name + "_biases", initializer=init, shape=shape)
         self.var_dict[(name, 1)] = var
-        #_variable_summaries(var)
         return var
 
     def get_fc_weight(self, name):
@@ -315,7 +293,6 @@ class FCN8VGG:
             weight_decay = tf.mul(tf.nn.l2_loss(var), self.wd,
                                   name='weight_loss')
             tf.add_to_collection('losses', weight_decay)
-        #_variable_summaries(var)
         return var
 
     def _bias_reshape(self, bweight, num_orig, num_new):
@@ -369,7 +346,7 @@ class FCN8VGG:
                 fweight[:, :, :, start_idx:end_idx], axis=3)
         return avg_fweight
 
-    def _variable_with_weight_decay(self, shape, stddev, wd,name, decoder=False):
+    def _variable_with_weight_decay(self, shape, stddev, wd):
         """Helper to create an initialized Variable with weight decay.
 
         Note that the Variable is initialized with a truncated normal
@@ -391,35 +368,22 @@ class FCN8VGG:
         initializer = tf.constant_initializer(0.0)
         var = tf.get_variable('weights', shape=shape,
                               initializer=initializer)
-
+        self.var_dict[('score_pool4', 0)] = var
         if wd and (not tf.get_variable_scope().reuse):
             weight_decay = tf.mul(tf.nn.l2_loss(var), wd, name='weight_loss')
-            if not decoder:
-                tf.add_to_collection('losses', weight_decay)
-            else:
-                tf.add_to_collection('dec_losses', weight_decay)
-        #_variable_summaries(var)
-        self.var_dict[(name, 0)] = var
+            tf.add_to_collection('losses', weight_decay)
         return var
 
-    def _add_wd_and_summary(self, var, wd, collection_name="losses"):
-        if wd and (not tf.get_variable_scope().reuse):
-            weight_decay = tf.mul(tf.nn.l2_loss(var), wd, name='weight_loss')
-            tf.add_to_collection(collection_name, weight_decay)
-        #_variable_summaries(var)
-        return var
-
-    def _bias_variable(self, shape,name, constant=0.0):
+    def _bias_variable(self, shape, constant=0.0):
         initializer = tf.constant_initializer(constant)
         var = tf.get_variable(name='biases', shape=shape,
-                              initializer=initializer)
-        self.var_dict[(name, 1)] = var
-        #_variable_summaries(var)
+                               initializer=initializer)
+        self.var_dict[('score_pool4', 1)] = var
         return var
 
     def get_fc_weight_reshape(self, name, shape, num_classes=None):
         print('Layer name: %s' % name)
-        print('Layer shape: %s' % str(shape))
+        print('Layer shape: %s' % shape)
         weights = self.data_dict[name][0]
         #weights = weights.reshape(shape)
         #if num_classes is not None:
@@ -427,16 +391,16 @@ class FCN8VGG:
         #                                    num_new=num_classes)
         init = tf.constant_initializer(value=weights,
                                        dtype=tf.float32)
-        var = tf.get_variable(name=name + "_weights", initializer=init, shape=shape)
+        var= tf.get_variable(name + "_weights", initializer=init, shape=shape)
         self.var_dict[(name, 0)] = var
         if not tf.get_variable_scope().reuse:
             weight_decay = tf.mul(tf.nn.l2_loss(var), self.wd,
                                   name='weight_loss')
             tf.add_to_collection('losses', weight_decay)
         return var
-
-
-    def save_npy(self, sess, npy_path="./fcn-vgg16-save.npy"):
+    
+    
+    def save_npy(self, sess, npy_path="./fcn16-save.npy"):
         assert isinstance(sess, tf.Session)
         data_dict = {}
         for (name, idx), var in self.var_dict.items():
@@ -448,6 +412,7 @@ class FCN8VGG:
         np.save(npy_path, data_dict)
         print("file saved", npy_path)
         return npy_path
+
 
 def _activation_summary(x):
     """Helper to create summaries for activations.
@@ -466,19 +431,3 @@ def _activation_summary(x):
     # tensor_name = re.sub('%s_[0-9]*/' % TOWER_NAME, '', x.op.name)
     tf.histogram_summary(tensor_name + '/activations', x)
     tf.scalar_summary(tensor_name + '/sparsity', tf.nn.zero_fraction(x))
-
-
-def _variable_summaries(var):
-    """Attach a lot of summaries to a Tensor."""
-    if not tf.get_variable_scope().reuse:
-        name = var.op.name
-        logging.info("Creating Summary for: %s" % name)
-        with tf.name_scope('summaries'):
-            mean = tf.reduce_mean(var)
-            tf.scalar_summary(name + '/mean', mean)
-            with tf.name_scope('stddev'):
-                stddev = tf.sqrt(tf.reduce_sum(tf.square(var - mean)))
-            tf.scalar_summary(name + '/sttdev', stddev)
-            tf.scalar_summary(name + '/max', tf.reduce_max(var))
-            tf.scalar_summary(name + '/min', tf.reduce_min(var))
-            tf.histogram_summary(name, var)

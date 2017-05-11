@@ -88,12 +88,12 @@ class FCN32VGG:
 
         self.fc6 = self._fc_layer(self.pool5, "fc6")
 
-        if train:
+        if train is not None:
             self.fc6 = tf.nn.dropout(self.fc6, 0.5)
             print("fc6 dropout_added")
 
         self.fc7 = self._fc_layer(self.fc6, "fc7")
-        if train:
+        if train is not None:
             self.fc7 = tf.nn.dropout(self.fc7, 0.5)
             print("fc7 dropout_added")
 
